@@ -91,8 +91,8 @@ async function removeUserFromRoom(user, room) {
 
 async function addMessageToRoom(roomId, username, msg) {
   const {room, encrypted_message_hex} = msg
+  console.log(msg)
   msg.time = new Date().getTime();
-
   if (room) {
     sendToRoom(room, 'new message', {
       username: username,
@@ -131,6 +131,7 @@ io.on('connection', (socket) => {
   socket.on('login', async (req) => {
     signInWithEmailAndPassword(auth, req.email, req.password)
       .then(async (data) => {
+        const user = await getUserByUsername(req.username)
         username = req.username
         userLoggedIn = true;
         const rooms = await getAllRooms()
@@ -140,7 +141,10 @@ io.on('connection', (socket) => {
           users: await getAllUsers(),
           rooms: rooms,
           publicChannels: publicChannels,
-          username: username
+          username: username,
+          private_key: user.private_key_encrypted,
+          iv: user.iv,
+          salt: user.salt
         });
       })
       .catch((error) => {
@@ -164,7 +168,10 @@ io.on('connection', (socket) => {
           users: await getAllUsers(),
           rooms: await getAllRooms(),
           publicChannels: publicChannels,
-          username: username
+          username: username,
+          private_key: req.private_key,
+          iv: req.iv,
+          salt: req.salt
         });
       })
       .catch((error) => {
@@ -183,6 +190,7 @@ io.on('connection', (socket) => {
 
   socket.on('new message', async (msg) => {
     const {username, room} = msg
+    console.log(msg)
     if (userLoggedIn) {
       await addMessageToRoom(room.id, username, msg);
     }

@@ -148,7 +148,6 @@ async function removeMember(user, roomID) {
 }
 
 async function addMessage(msg, roomID) {
-    console.log("addMessage")
     const {username, encrypted_message_hex, encrypted_symmetric_key_hex, room, time} = msg
     const history = room.history
     const toPush = {

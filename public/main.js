@@ -7,197 +7,30 @@ $(function () {
   const $roomList = $('#room-list');
   const $userList = $('#user-list');
   const encoder = new TextEncoder()
+  const decoder = new TextDecoder()
 
-  function generateSessionKey() {
-    // Create an array to store the random bytes
-    const keyBytes = new Uint8Array(32); // 32 bytes = 256 bits
-    // Generate random values and fill the array with them
-    crypto.getRandomValues(keyBytes);
-    // Convert the byte array to a string representation
-    const sessionKey = Array.from(keyBytes)
-      .map(byte => byte.toString(16).padStart(2, '0'))
-      .join('');
-
-    return sessionKey;
-  }
-
-  ////////////////
-  // Encryption //
-  ////////////////
-  const RSA_ALGORITHM = {
-    name: 'RSA-OAEP',
-    modulusLength: 2048,
-    publicExponent: new Uint8Array([0x01, 0x00, 0x01]), // 65537 - commonly used and recommended value for the public exponent
-    hash: { name: 'SHA-256' },
-  };
-  const AES_ALGORITHM = {
-    name: 'AES-CBC',
-    length: 256
-  }
-  const EXTRACTABLE = true;
-  const USAGES = ['encrypt', 'decrypt'];
-
-  async function deriveEncryptionKeyFromPassword(password, salt) {
-    const PASSWORD_DERIVATION_ALGORITHM = {
-      name: 'PBKDF2',
-      salt: salt, // Generate a random salt value
-      iterations: 100000,
-      hash: 'SHA-256'
+  function saveUserInStorage(username, private_key, iv, salt) {
+    const user = {
+      username: username,
+      private_key: private_key,
+      iv: iv,
+      salt: salt
     }
-    // Convert the password to an encryption key using a key derivation function
-    const passwordKey = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(password),
-      PASSWORD_DERIVATION_ALGORITHM,
-      false,
-      ['deriveKey']
-    );
-    // Derive an AES symmetric key from the password key
-    const aesDerivedKey = await crypto.subtle.deriveKey(
-      PASSWORD_DERIVATION_ALGORITHM,
-      passwordKey,
-      AES_ALGORITHM,
-      EXTRACTABLE,
-      USAGES
-    );
-    return aesDerivedKey;
+    sessionStorage.setItem('user', JSON.stringify(user));
   }
 
-
-
-  async function encryptPrivateKey(password, private_key) {
-    // Generate a random salt
-    const salt = crypto.getRandomValues(new Uint8Array(16))
-    // Get our symmetric key from our password to encrypt the private_key with it
-    const aesDerivedKey = await deriveEncryptionKeyFromPassword(password, salt)
-    // Generate a random Initialization Vector (IV)
-    const iv = crypto.getRandomValues(new Uint8Array(16));
-    // Encrypt the private key with the derived AES key
-    const encryptedPrivateKeyBuffer = await crypto.subtle.encrypt(
-      { name: 'AES-CBC', iv },
-      // So we encrypt the private_key with the aes symmetric key
-      aesDerivedKey,
-      private_key
-    );
-    // Convert the encrypted private key to hex format
-    const encryptedPrivateKeyHex = arrayBufferToHex(encryptedPrivateKeyBuffer);
-    // Return the encrypted private key in hex format
-    return { encryptedPrivateKeyHex, iv, salt };
-  }
-
-  async function decryptPrivateKey(password, encryptedPrivateKeyHex, iv, salt) {
-    // Convert the password to an encryption key using a key derivation function and then derive an AES key from the password key
-    const aesDerivedKey = await deriveEncryptionKeyFromPassword(password, salt)
-    // Convert the encrypted private key from hex to ArrayBuffer
-    const encryptedPrivateKeyBuffer = hexToArrayBuffer(encryptedPrivateKeyHex);
-    // Decrypt the private key with the derived AES key
-    const decryptedPrivateKeyBuffer = await crypto.subtle.decrypt(
-      { name: 'AES-CBC', iv },
-      aesDerivedKey,
-      encryptedPrivateKeyBuffer
-    );
-    // Return the decrypted private key as an ArrayBuffer
-    return decryptedPrivateKeyBuffer;
-  }
-
-  async function generateKeyPairs(password) {
-    console.log("GENERATE")
-    let { publicKey, privateKey } = await crypto.subtle.generateKey(
-      RSA_ALGORITHM,
-      EXTRACTABLE,
-      USAGES
-    );
-    // Export public key in SPKI format and convert to hex string
-    const exportedPublicKey = await crypto.subtle.exportKey('spki', publicKey);
-    const publicKeyHex = arrayBufferToHex(exportedPublicKey);
-    // Convert public key to hex string
-    // Export and encrypt private key with the password
-    const exportedPrivateKey = await crypto.subtle.exportKey('pkcs8', privateKey);
-    const { encryptedPrivateKeyHex, iv, salt } = await encryptPrivateKey(password, exportedPrivateKey);
-    return { publicKeyHex, encryptedPrivateKeyHex, iv, salt }
-  }
-
-  function arrayBufferToHex(buffer) {
-    return Array.from(new Uint8Array(buffer))
-      .reduce((hexString, byte) => hexString + byte.toString(16).padStart(2, '0'), '');
-  }
-
-  function hexToArrayBuffer(hexString) {
-    const bytes = new Uint8Array(hexString.length / 2);
-    for (let i = 0; i < hexString.length; i += 2) {
-      const byte = parseInt(hexString.substr(i, 2), 16);
-      bytes[i / 2] = byte;
-    }
-    return bytes.buffer;
-  }
-
-  // Generate a random symmetric key
-  async function generateSymmetricKey() {
-    const key = await window.crypto.subtle.generateKey(
-      AES_ALGORITHM,
-      EXTRACTABLE,
-      USAGES
-    );
-    return key;
-  }
-
-  // Encrypt the symmetric key with a user's public key
-  async function encryptSymmetricKey(symmetric_key, public_key) {
-    const importedPublicKey = await window.crypto.subtle.importKey(
-      'spki',
-      hexToArrayBuffer(public_key),
-      {
-        name: 'RSA-OAEP',
-        hash: { name: 'SHA-256' },
-      },
-      false,
-      ['encrypt']
-    );
-    const encryptedKey = await window.crypto.subtle.encrypt(
-      {
-        name: 'RSA-OAEP',
-      },
-      importedPublicKey,
-      hexToArrayBuffer(symmetric_key)
-    );
-    return encryptedKey;
-  }
-
-  async function generateEncryptedSymmetricKey(public_keys) {
-    try {
-      let symmetric_key = await generateSymmetricKey();
-      for (const pk of public_keys) {
-        symmetric_key = await encryptSymmetricKey(symmetric_key, pk);
-      }
-      return arrayBufferToHex(symmetric_key);
-    } catch (ex) {
-      console.error('Error generating encrypted symmetric key:', ex);
-    }
-  }
-
-  async function generateNewEncryptSymmetricKey(public_keys, symmetric_key) {
-    try {
-      for (const pk of public_keys) {
-        symmetric_key = await encryptSymmetricKey(symmetric_key, pk);
-      }
-      return arrayBufferToHex(symmetric_key);
-    } catch (ex) {
-      console.error('Error generating encrypted symmetric key:', ex);
-    }
-  }
-
-
-  // Usage
-  const sessionKey = generateSessionKey();
-  // console.log(sessionKey);
-
-  function saveUsernameInStorage(username) {
-    sessionStorage.setItem('username', username);
+  function getUserFromStorage() {
+    const user = JSON.parse(sessionStorage.getItem('user'));
+    return user;
   }
 
   function getUsernameFromStorage() {
-    const username = sessionStorage.getItem('username');
-    return username;
+    const user = getUserFromStorage()
+    if (user) {
+      return user.username;
+    } else {
+      return null;
+    }
   }
 
   let connected = false;
@@ -220,8 +53,8 @@ $(function () {
     );
   $("#loginModal").modal('show');
 
-  function setUsername(name) {
-    saveUsernameInStorage(name)
+  function setUsername(name, private_key, iv, salt) {
+    saveUserInStorage(name, private_key, iv, salt)
     $usernameLabel.text(name);
   }
   window.setUsername = setUsername;
@@ -238,13 +71,13 @@ $(function () {
     const temail = $("#inp-email-reg").val();
     const tusername = $("#inp-username-reg").val();
     const tpassword = $("#inp-password-reg").val();
-    const { publicKeyHex, encryptedPrivateKeyHex, iv, salt } = await generateKeyPairs(tpassword)
+    const { public_key, encrypted_private_key, iv, salt } = await generateKeyPairs(tpassword)
     socket.emit('register', {
       email: temail,
       username: tusername,
       password: tpassword,
-      public_key: publicKeyHex,
-      private_key: encryptedPrivateKeyHex,
+      public_key: arrayBufferToHex(public_key),
+      private_key: arrayBufferToHex(encrypted_private_key),
       iv: arrayBufferToHex(iv),
       salt: arrayBufferToHex(salt)
     });
@@ -343,6 +176,7 @@ $(function () {
     let oldRoom = currentRoom;
     const room = rooms.find(r => r.id === id);
     currentRoom = room;
+    
     $messages.empty();
     if (room.history) {
       room.history.forEach(m => addChatMessage(m));
@@ -436,10 +270,10 @@ $(function () {
   function addChannel() {
     const name = $("#inp-channel-name").val();
     const description = $("#inp-channel-description").val();
-    const private = $('#inp-private').is(':checked');
+    const tprivate = $('#inp-private').is(':checked');
     const iv = crypto.getRandomValues(new Uint8Array(16))
     const salt = crypto.getRandomValues(new Uint8Array(16))
-    socket.emit('add_channel', { name: name, description: description, private: private, iv: arrayBufferToHex(iv), salt: arrayBufferToHex(salt) });
+    socket.emit('add_channel', { name: name, description: description, private: tprivate, iv: arrayBufferToHex(iv), salt: arrayBufferToHex(salt) });
   }
   window.addChannel = addChannel;
 
@@ -488,14 +322,13 @@ $(function () {
   ///////////////////
 
   socket.on('login_error', req => {
-    console.log("sqsdfqsdf")
-    setUsername("error")
+    $usernameLabel.text("error");
   })
 
   // Whenever the server emits -login-, log the login message
   socket.on('login', async (data) => {
-    const {username, users, rooms, publicChannels} = data
-    setUsername(username)
+    const { username, users, rooms, publicChannels, private_key, iv, salt } = data
+    setUsername(username, private_key, iv, salt)
     connected = true;
     updateUsers(users);
     updateRooms(rooms);
@@ -512,15 +345,37 @@ $(function () {
   });
 
   // Whenever the server emits 'new message', update the chat body
-  socket.on('new message', (msg) => {
-    console.log(msg)
+  socket.on('new message', async (msg) => {
+    let { private_key, iv, salt } = getUserFromStorage()
+    let { encrypted_message_hex, encrypted_symmetric_key_hex } = msg.data
+    //Transform data in correct formats
+    iv = hexToArrayBuffer(iv);
+    salt = hexToArrayBuffer(salt)
+    const encrypted_private_key = hexToArrayBuffer(private_key)
+    const encrypted_symmetric_key = hexToArrayBuffer(encrypted_symmetric_key_hex)
+    const encrypted_message = hexToArrayBuffer(encrypted_message_hex)
+    const room_iv = hexToArrayBuffer(msg.data.room.options.iv)
+    const salt_iv = hexToArrayBuffer(msg.data.room.options.iv)
+    const decrypted_symmetric_key = await decryptSymmetricKey(encrypted_private_key, encrypted_symmetric_key, iv, salt)
+    // Assuming you have exported the symmetric key as `exportedSymmetricKey`
+    const imported_decrypted_symmetric_key = await window.crypto.subtle.importKey(
+      'raw',
+      decrypted_symmetric_key,
+      AES_ALGORITHM,
+      false,
+      ['decrypt']
+    );
+    // Decrypt the encrypted message using the imported symmetric key
+    const decrypted_message = await decryptMessage(encrypted_message, imported_decrypted_symmetric_key, room_iv)
     const roomId = msg.room;
     const room = rooms[roomId];
     if (room) {
       room.history.push(msg);
     }
-    if (roomId == currentRoom.id)
+    if (roomId == currentRoom.id){
+      msg.message = decrypted_message
       addChatMessage(msg);
+    }
     else
       messageNotify(msg);
   });
@@ -528,8 +383,7 @@ $(function () {
   socket.on('new message encrypt', async (data) => {
     const { public_keys, room, message } = data;
     // Step 1: Generate a random symmetric key
-    const symmetric_key = await generateSymmetricKey()
-
+    let symmetric_key = await generateSymmetricKey2()
     // Step 2: Encrypt the message content using the symmetric key
     const encoded_message = encoder.encode(message);
     const iv_buffer = hexToArrayBuffer(room.options.iv)
@@ -540,12 +394,13 @@ $(function () {
     );
     const encrypted_message_hex = arrayBufferToHex(encrypted_message_buffer);
 
-    // Step 3: Encrypt the symmetric key with the public keys of the recipients
-    const encrypted_symmetric_key_hex = await generateNewEncryptSymmetricKey(public_keys, symmetric_key);
+    symmetric_key = await window.crypto.subtle.exportKey('raw', symmetric_key);
+    // Step 3: Encrypt the same used symmetric key with the public keys of the recipients
+    const encrypted_symmetric_key_hex = await encryptSymmetricKey(public_keys, symmetric_key);
     socket.emit('new message', {
       username: getUsernameFromStorage(),
       encrypted_message_hex: encrypted_message_hex,
-      encrypted_symmetric_key_hex: encrypted_symmetric_key_hex,
+      encrypted_symmetric_key_hex: arrayBufferToHex(encrypted_symmetric_key_hex),
       room: room
     })
   })
@@ -582,10 +437,10 @@ $(function () {
   });
 
   socket.on('generate_new_symmetric_key', async (data) => {
-    const new_symmetric_key = await generateEncryptedSymmetricKey(data.public_keys)
+    const new_symmetric_key = await generateEncryptedSymmetricKeyFromPublicKeys(data.public_keys)
     socket.emit('update_new_symmetric_key', {
       roomID: data.roomID,
-      symmetric_key: new_symmetric_key
+      symmetric_key: arrayBufferToHex(new_symmetric_key)
     })
   })
 
@@ -600,7 +455,7 @@ $(function () {
   ////////////////
 
   socket.on('connect', () => {
-    if (getUsernameFromStorage() != undefined) {
+    if (getUserFromStorage() != undefined) {
       socket.emit('join', getUsernameFromStorage())
     }
   });
@@ -610,7 +465,7 @@ $(function () {
 
   socket.on('reconnect', () => {
     // join
-    if (getUsernameFromStorage() != undefined) {
+    if (getUserFromStorage() != undefined) {
       socket.emit('join', getUsernameFromStorage());
     }
   });
