@@ -1,16 +1,16 @@
 // Setup basic express server
 const express = require('express');
-const app     = express();
-const path    = require('path');
-const server  = require('http').createServer(app);
-const io      = require('socket.io')(server);
-const port    = process.env.PORT || 3000;
-
-const Rooms   = require('./rooms.js');
-const Users   = require('./users.js');
+const app = express();
+const path = require('path');
+const server = require('http').createServer(app);
+const io = require('socket.io')(server);
+const port = process.env.PORT || 3000;
+const Rooms = require('./rooms.js');
+const Users = require('./users.js');
+const { auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, addUser, getAllUsers, getUserByUsername, setActiveState, getAllRooms, getRoomById, addRoom, addSubscription, getAllPublicChannels, addMember, addMessage, removeMember, removeSubscription, directRoomExists, getAllForcedChannels, getAllUsersByUsernames, getMembers, updateSymmetricKeyFromRoom } = require("./firebaseConfig");
 
 // Load application config/state
-require('./basicstate.js').setup(Users,Rooms);
+require('./basicstate.js').setup(Users, Rooms);
 
 // Start server
 server.listen(port, () => {
@@ -20,112 +20,98 @@ server.listen(port, () => {
 // Routing for client-side files
 app.use(express.static(path.join(__dirname, 'public')));
 
-
 ///////////////////////////////
 // Chatroom helper functions //
 ///////////////////////////////
 
 function sendToRoom(room, event, data) {
-  io.to('room' + room.getId()).emit(event, data);
+  io.to('room' + room.id).emit(event, data);
 }
 
-function newUser(name) {
-  const user = Users.addUser(name);
-  const rooms = Rooms.getForcedRooms();
-
-  rooms.forEach(room => {
-    addUserToRoom(user, room);
-  });
-
-  return user;
-}
-
-function newRoom(name, user, options) {
-  const room = Rooms.addRoom(name, options);
-  addUserToRoom(user, room);
+async function newRoom(name, user, options) {
+  const room = await addRoom(name, options);
+  await addUserToRoom(user, room);
   return room;
 }
 
-function newChannel(name, description, private, user) {
-  return newRoom(name, user, {
+async function newChannel(name, description, private, user, iv, salt) {
+  return await newRoom(name, user, {
     description: description,
-    private: private
+    private: private,
+    iv: iv,
+    salt: salt
   });
 }
 
-function newDirectRoom(user_a, user_b) {
-  const room = Rooms.addRoom(`Direct-${user_a.name}-${user_b.name}`, {
+async function newDirectRoom(user_a, user_b) {
+  const room = await addRoom(`Direct-${user_a.username}-${user_b.username}`, {
     direct: true,
     private: true,
   });
 
-  addUserToRoom(user_a, room);
-  addUserToRoom(user_b, room);
+  await addUserToRoom(user_a, room);
+  await addUserToRoom(user_b, room);
 
   return room;
 }
 
-function getDirectRoom(user_a, user_b) {
-  const rooms = Rooms.getRooms().filter(r => r.direct 
-    && (
-      (r.members[0] == user_a.name && r.members[1] == user_b.name) ||
-      (r.members[1] == user_a.name && r.members[0] == user_b.name)
-    ));
-
-  if (rooms.length == 1)
-    return rooms[0];
-  else
+async function getDirectRoom(user_a, user_b) {
+  const exists = await directRoomExists(user_a, user_b)
+  if (exists) {
+    return exists;
+  } else {
     return newDirectRoom(user_a, user_b);
+  }
 }
 
-function addUserToRoom(user, room) {
-  user.addSubscription(room);
-  room.addMember(user);
-
+async function addUserToRoom(user, room) {
+  await addSubscription(user, room.id);
+  await addMember(user, room.id);
+  const members = await getMembers(room.id)
   sendToRoom(room, 'update_user', {
-    room: room.getId(),
+    room: room,
     username: user,
     action: 'added',
-    members: room.getMembers()
+    members: members
   });
 }
 
-function removeUserFromRoom(user, room) {
-  user.removeSubscription(room);
-  room.removeMember(user);
+async function removeUserFromRoom(user, room) {
+  removeSubscription(user, room.id);
+  removeMember(user, room.id);
+  const members = await getMembers(room.id)
 
   sendToRoom(room, 'update_user', {
-    room: room.getId(),
+    room: room.id,
     username: user,
     action: 'removed',
-    members: room.getMembers()
+    members: members
   });
 }
 
-function addMessageToRoom(roomId, username, msg) {
-  const room = Rooms.getRoom(roomId);
-
+async function addMessageToRoom(roomId, username, msg) {
+  const {room, encrypted_message_hex} = msg
   msg.time = new Date().getTime();
 
   if (room) {
     sendToRoom(room, 'new message', {
       username: username,
-      message: msg.message,
-      room: msg.room,
+      message:  encrypted_message_hex,
+      room: room.id,
       time: msg.time,
-      direct: room.direct
+      direct: room.direct,
+      data: msg
     });
-
-    room.addMessage(msg);
+    await addMessage(msg, room.id)
   }
 }
 
-function setUserActiveState(socket, username, state) {
-  const user = Users.getUser(username);
+async function setUserActiveState(socket, username, state) {
+  const user = await getUserByUsername(username);
 
   if (user)
-    user.setActiveState(state);
-  
+    await setActiveState(username, state);
+
   socket.broadcast.emit('user_state_change', {
     username: username,
     active: state
@@ -141,16 +127,77 @@ const socketmap = {};
 io.on('connection', (socket) => {
   let userLoggedIn = false;
   let username = false;
-  
+
+  socket.on('login', async (req) => {
+    signInWithEmailAndPassword(auth, req.email, req.password)
+      .then(async (data) => {
+        username = req.username
+        userLoggedIn = true;
+        const rooms = await getAllRooms()
+        const publicChannels = rooms.filter(r => !r.options.direct && !r.options.private);
+        rooms.forEach(r => socket.join('room' + r.id))
+        socket.emit('login', {
+          users: await getAllUsers(),
+          rooms: rooms,
+          publicChannels: publicChannels,
+          username: username
+        });
+      })
+      .catch((error) => {
+        const errorMessage = error.message;
+        console.log(errorMessage)
+        socket.emit('login_error', {
+          error: errorMessage
+        })
+      });
+  });
+
+  socket.on('register', async (req) => {
+    createUserWithEmailAndPassword(auth, req.email, req.password)
+      .then(async (data) => {
+        username = req.username
+        userLoggedIn = true;
+        const rooms = await getAllRooms()
+        const publicChannels = rooms.filter(r => !r.options.direct && !r.options.private);
+        await addUser(username, req.public_key, req.private_key, req.iv, req.salt)
+        socket.emit('login', {
+          users: await getAllUsers(),
+          rooms: await getAllRooms(),
+          publicChannels: publicChannels,
+          username: username
+        });
+      })
+      .catch((error) => {
+        const errorMessage = error.message;
+        console.log(errorMessage)
+        socket.emit('register_error', {
+          error: errorMessage
+        })
+      });
+  });
+
+
   ///////////////////////
   // incomming message //
   ///////////////////////
 
-  socket.on('new message', (msg) => {
+  socket.on('new message', async (msg) => {
+    const {username, room} = msg
     if (userLoggedIn) {
-      console.log(msg);
-      addMessageToRoom(msg.room, username, msg);
+      await addMessageToRoom(room.id, username, msg);
     }
+  });
+
+  socket.on('new message unencrypted', async (msg) => {
+    // const room = await getRoomById(msg.room.id)
+    const room = msg.room
+    const usernames = await getAllUsersByUsernames(room.members)
+    const public_keys = usernames.map(u => u.public_key)
+    socket.emit('new message encrypt', {
+      public_keys: public_keys,
+      room: room,
+      message: msg.message
+    })
   });
 
   /////////////////////////////
@@ -158,17 +205,17 @@ io.on('connection', (socket) => {
   /////////////////////////////
 
 
-  socket.on('request_direct_room', req => {
+  socket.on('request_direct_room', async (req) => {
     if (userLoggedIn) {
-      const user_a = Users.getUser(req.to);
-      const user_b = Users.getUser(username);
+      const user_a = await getUserByUsername(req.to);
+      const user_b = await getUserByUsername(username);
 
-      if(user_a && user_b) {
-        const room = getDirectRoom(user_a, user_b);
-        const roomCID = 'room' + room.getId();
+      if (user_a && user_b) {
+        const room = await getDirectRoom(user_a, user_b);
+        const roomCID = 'room' + room.id;
         socket.join(roomCID);
-        if (socketmap[user_a.name])
-         socketmap[user_a.name].join(roomCID);
+        if (socketmap[user_a.username])
+          socketmap[user_a.username].join(roomCID);
 
         socket.emit('update_room', {
           room: room,
@@ -178,21 +225,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('add_channel', req => {
+  socket.on('add_channel', async (req) => {
     if (userLoggedIn) {
-      const user = Users.getUser(username);
-      console.log(req);
-      const room = newChannel(req.name, req.description, req.private, user);
-      const roomCID = 'room' + room.getId();
+      const user = await getUserByUsername(username);
+      const room = await newChannel(req.name, req.description, req.private, user, req.iv, req.salt);
+      const roomCID = 'room' + room.id;
       socket.join(roomCID);
 
-      socket.emit('update_room', {
+      socket.emit('added_channel', {
         room: room,
         moveto: true
       });
 
       if (!room.private) {
-        const publicChannels = Rooms.getRooms().filter(r => !r.direct && !r.private);
+        const publicChannels = await getAllPublicChannels()
         socket.broadcast.emit('update_public_channels', {
           publicChannels: publicChannels
         });
@@ -200,15 +246,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('join_channel', req => {
-    if (userLoggedIn) {
-      const user = Users.getUser(username);
-      const room = Rooms.getRoom(req.id)
+  socket.on('get_public_keys_from_room', async(roomID) => {
+    const room = await getRoomById(roomID)
+    const public_keys = await (await getAllUsersByUsernames(room.members)).map(u => u.public_key)
+    socket.emit('generate_new_symmetric_key', {
+      public_keys:public_keys,
+      roomID: room.id
+    })
+  })
 
-      if(!room.direct && !room.private) {
-        addUserToRoom(user, room);
-        
-        const roomCID = 'room' + room.getId();
+  socket.on('update_new_symmetric_key', async (data) => {
+    await updateSymmetricKeyFromRoom(data.roomID, data.symmetric_key)
+  })
+
+  socket.on('join_channel', async (req) => {
+    if (userLoggedIn) {
+      const user = await getUserByUsername(username);
+      const room = await getRoomById(req.id);
+
+      if (!room.direct && !room.private) {
+        await addUserToRoom(user, room);
+        const roomCID = 'room' + room.id;
         socket.join(roomCID);
 
         socket.emit('update_room', {
@@ -219,41 +277,44 @@ io.on('connection', (socket) => {
     }
   });
 
-  
-  socket.on('add_user_to_channel', req => {
+
+  socket.on('add_user_to_channel', async (req) => {
     if (userLoggedIn) {
-      const user = Users.getUser(req.user);
-      const room = Rooms.getRoom(req.channel)
-
-      if(!room.direct) {
-        addUserToRoom(user, room);
-        
-        if (socketmap[user.name]) {
-          const roomCID = 'room' + room.getId();
-          socketmap[user.name].join(roomCID);
-
-          socketmap[user.name].emit('update_room', {
+      const user = await getUserByUsername(req.user);
+      const room = await getRoomById(req.channel)
+      if (!room.direct) {
+        // Add user to members of the room
+        await addUserToRoom(user, room);
+        if (socketmap[user.username]) {
+          const roomCID = 'room' + room.id;
+          socketmap[user.username].join(roomCID);
+          socketmap[user.username].emit('update_room', {
             room: room,
             moveto: false
           });
         }
+        const public_keys = await (await getAllUsersByUsernames(room.members)).map(u => u.public_key)
+        socket.emit('generate_new_symmetric_key', {
+          public_keys:public_keys,
+          roomID: room.id
+        })
       }
     }
   });
 
-  socket.on('leave_channel', req => {
+  socket.on('leave_channel', async (req) => {
     if (userLoggedIn) {
-      const user = Users.getUser(username);
-      const room = Rooms.getRoom(req.id)
+      const user = await getUserByUsername(username);
+      const room = await getRoomById(req.id)
 
-      if(!room.direct && !room.forceMembership) {
-        removeUserFromRoom(user, room);
-        
-        const roomCID = 'room' + room.getId();
+      if (!room.direct && !room.forceMembership) {
+        await removeUserFromRoom(user, room);
+
+        const roomCID = 'room' + room.id;
         socket.leave(roomCID);
 
         socket.emit('remove_room', {
-          room: room.getId()
+          room: room.id
         });
       }
     }
@@ -263,30 +324,28 @@ io.on('connection', (socket) => {
   // user join //
   ///////////////
 
-  socket.on('join', (p_username) => {
-    if (userLoggedIn) 
-      return;
-
+  socket.on('join', async (p_username) => {
     username = p_username;
+    if (userLoggedIn)
+      return;
     userLoggedIn = true;
     socketmap[username] = socket;
+    const user = await getUserByUsername(username)
+    if (user) {
+      user.subscriptions.map(async (s) => {
+        socket.join('room' + s);
+        return await getRoomById(s);
+      });
+      const rooms = await getAllRooms()
+      const publicChannels = rooms.filter(r => !r.direct && !r.private);
+      socket.emit('login', {
+        users: await getAllUsers(),
+        rooms: rooms,
+        publicChannels: publicChannels
+      });
 
-    const user = Users.getUser(username) || newUser(username);
-    
-    const rooms = user.getSubscriptions().map(s => {
-      socket.join('room' + s);
-      return Rooms.getRoom(s);
-    });
-
-    const publicChannels = Rooms.getRooms().filter(r => !r.direct && !r.private);
-
-    socket.emit('login', {
-      users: Users.getUsers().map(u => ({username: u.name, active: u.active})),
-      rooms : rooms,
-      publicChannels: publicChannels
-    });
-
-    setUserActiveState(socket, username, true);
+      await setUserActiveState(socket, username, true);
+    }
   });
 
 
@@ -294,18 +353,18 @@ io.on('connection', (socket) => {
   // reconnects //
   ////////////////
 
-  socket.on('reconnect', () => {
+  socket.on('reconnect', async () => {
     if (userLoggedIn)
-      setUserActiveState(socket, username, true);
+      await setUserActiveState(socket, username, true);
   });
 
   /////////////////
   // disconnects //
   /////////////////
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     if (userLoggedIn)
-      setUserActiveState(socket, username, false);
+      await setUserActiveState(socket, username, false);
   });
 
 });
